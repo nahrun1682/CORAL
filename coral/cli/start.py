@@ -23,9 +23,39 @@ from coral.cli._helpers import (
 )
 
 
+def _resolved_python() -> str:
+    """Return the absolute path to the Python interpreter with coral installed.
+
+    Checks for a local venv first (preserving the venv symlink so that
+    venv site-packages are used), then falls back to sys.executable.
+    Using Path.resolve() would follow the venv symlink to the system
+    Python which doesn't have coral installed.
+    """
+    # If we're already running inside a venv, use it directly
+    if sys.prefix != sys.base_prefix:
+        return os.path.abspath(sys.executable)
+
+    # Look for a local .venv relative to the coral package
+    coral_pkg = Path(__file__).resolve().parent.parent.parent
+    for venv_name in (".venv", "venv"):
+        venv_python = coral_pkg / venv_name / "bin" / "python"
+        if venv_python.exists():
+            return str(venv_python)
+
+    # Fallback: current interpreter (absolute, but don't resolve symlinks)
+    return os.path.abspath(sys.executable)
+
+
+def _tmux_env() -> dict[str, str]:
+    """Build an environment for tmux that allows nested session creation."""
+    env = dict(os.environ)
+    env.pop("TMUX", None)  # Allow creating sessions even if nested
+    return env
+
+
 def _build_coral_command(args: argparse.Namespace) -> list[str]:
     """Reconstruct the coral start command with --no-tmux added."""
-    cmd = [sys.executable, "-m", "coral.cli", "start"]
+    cmd = [_resolved_python(), "-m", "coral.cli", "start"]
     cmd.extend(["--config", str(Path(args.config).resolve())])
     if args.agents:
         cmd.extend(["--agents", str(args.agents)])
@@ -68,6 +98,7 @@ def _start_in_tmux(args: argparse.Namespace) -> None:
         capture_output=True,
         text=True,
         cwd=Path.cwd(),
+        env=_tmux_env(),
     )
     if result.returncode != 0:
         print(f"Error creating tmux session: {result.stderr}", file=sys.stderr)
@@ -100,7 +131,7 @@ def _resume_in_tmux(args: argparse.Namespace, coral_dir: Path) -> None:
         capture_output=True,
     )
 
-    cmd = [sys.executable, "-m", "coral.cli", "resume"]
+    cmd = [_resolved_python(), "-m", "coral.cli", "resume"]
     if args.task:
         cmd.extend(["--task", args.task])
     if args.run:
@@ -119,6 +150,7 @@ def _resume_in_tmux(args: argparse.Namespace, coral_dir: Path) -> None:
         capture_output=True,
         text=True,
         cwd=Path.cwd(),
+        env=_tmux_env(),
     )
     if result.returncode != 0:
         print(f"Error creating tmux session: {result.stderr}", file=sys.stderr)
@@ -139,6 +171,13 @@ def cmd_start(args: argparse.Namespace) -> None:
     if not args.no_tmux and not in_tmux() and has_tmux():
         _start_in_tmux(args)
         return
+
+    if not args.no_tmux and not in_tmux() and not has_tmux():
+        print(
+            "Warning: tmux is not installed. Running in foreground mode.\n"
+            "  Install tmux for background session support: brew install tmux (macOS) / apt install tmux (Linux)\n",
+            file=sys.stderr,
+        )
 
     from coral.agent.manager import AgentManager
     from coral.config import CoralConfig
@@ -205,9 +244,11 @@ def cmd_start(args: argparse.Namespace) -> None:
         )
         if result.returncode == 0:
             session_name = result.stdout.strip()
-            tmux_file = manager.paths.coral_dir / "public" / ".coral_tmux_session"
-            tmux_file.write_text(session_name)
-            # Don't create .coral_tmux_owned — coral didn't create this session
+            # Mark as owned if coral created this tmux session (via _start_in_tmux)
+            coral_owns = session_name.startswith("coral-")
+            save_tmux_session_name(
+                manager.paths.coral_dir / "public", session_name, owned=coral_owns
+            )
 
     if args.ui:
         from coral.cli.ui import start_ui_background
@@ -215,10 +256,10 @@ def cmd_start(args: argparse.Namespace) -> None:
         start_ui_background(manager.paths.coral_dir)
 
     if config.agents.count == 1 and verbose:
-        print("\nAgent running (Ctrl+C to stop)...\n")
+        print("\nAgent running...\n")
         manager.wait_for_completion()
     else:
-        print("\nMonitoring agents (Ctrl+C to stop)...")
+        print("\nMonitoring agents...")
         manager.monitor_loop()
 
 
@@ -235,16 +276,24 @@ def cmd_resume(args: argparse.Namespace) -> None:
         getattr(args, "run", None),
     )
 
-    existing_session = find_tmux_session(coral_dir)
-    if existing_session:
-        print(f"Found existing tmux session: {existing_session}")
-        print("Attaching...")
-        os.execvp("tmux", ["tmux", "attach", "-t", existing_session])
-        return
+    if not getattr(args, "no_tmux", False):
+        existing_session = find_tmux_session(coral_dir)
+        if existing_session:
+            print(f"Found existing tmux session: {existing_session}")
+            print("Attaching...")
+            os.execvp("tmux", ["tmux", "attach", "-t", existing_session])
+            return
 
     if not getattr(args, "no_tmux", False) and not in_tmux() and has_tmux():
         _resume_in_tmux(args, coral_dir)
         return
+
+    if not getattr(args, "no_tmux", False) and not in_tmux() and not has_tmux():
+        print(
+            "Warning: tmux is not installed. Running in foreground mode.\n"
+            "  Install tmux for background session support: brew install tmux (macOS) / apt install tmux (Linux)\n",
+            file=sys.stderr,
+        )
 
     pid_file = coral_dir / "public" / "manager.pid"
     if pid_file.exists():
@@ -303,16 +352,18 @@ def cmd_resume(args: argparse.Namespace) -> None:
         )
         if result.returncode == 0:
             session_name = result.stdout.strip()
-            tmux_file = paths.coral_dir / "public" / ".coral_tmux_session"
-            tmux_file.write_text(session_name)
-            # Don't create .coral_tmux_owned — coral didn't create this session
+            # Mark as owned if coral created this tmux session (via _resume_in_tmux)
+            coral_owns = session_name.startswith("coral-")
+            save_tmux_session_name(
+                paths.coral_dir / "public", session_name, owned=coral_owns
+            )
 
     if getattr(args, "ui", False):
         from coral.cli.ui import start_ui_background
 
         start_ui_background(paths.coral_dir)
 
-    print("\nMonitoring agents (Ctrl+C to stop)...")
+    print("\nMonitoring agents...")
     manager.monitor_loop()
 
 
