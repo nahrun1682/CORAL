@@ -8,7 +8,9 @@ Japanese RAG PoC task scaffold for CORAL using JaQuAD.
 bash examples/rag_jaquad/scripts/download_jaquad.sh
 uv run python examples/rag_jaquad/scripts/prepare_jaquad.py \
   --input-root examples/rag_jaquad/data/raw/JaQuAD/data \
-  --output-root examples/rag_jaquad/data/processed
+  --output-root examples/rag_jaquad/data/processed \
+  --validation-sample-size 200 \
+  --validation-sample-seed 42
 ```
 
 Expected outputs:
