@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from examples.rag_jaquad.scripts.prepare_jaquad import convert_split_dir, convert_split_file, main
 
 
@@ -174,7 +176,7 @@ def test_main_prints_validation_selected_queries(tmp_path: Path, monkeypatch, ca
     input_root = tmp_path / "raw" / "JaQuAD" / "data"
     (input_root / "train").mkdir(parents=True)
     (input_root / "dev").mkdir(parents=True)
-    _write_split_file(input_root / "train" / "train_0000.json", prefix="train", count=2)
+    _write_split_file(input_root / "train" / "train_0000.json", prefix="train", count=5)
     _write_split_file(input_root / "dev" / "dev_0000.json", prefix="dev", count=5)
 
     output_root = tmp_path / "processed"
@@ -199,4 +201,20 @@ def test_main_prints_validation_selected_queries(tmp_path: Path, monkeypatch, ca
     summary = json.loads(capsys.readouterr().out)
     assert "selected_queries" in summary["validation"]
     assert len(summary["validation"]["selected_queries"]) == 2
-    assert summary["train"]["queries"] == 2
+    assert summary["train"]["queries"] == 5
+
+
+def test_convert_split_dir_rejects_negative_validation_sample_size(tmp_path: Path) -> None:
+    split_dir = tmp_path / "dev"
+    split_dir.mkdir()
+    _write_split_file(split_dir / "jaquad_dev_0000.json", prefix="q", count=3)
+
+    with pytest.raises(ValueError, match="validation-sample-size must be non-negative"):
+        convert_split_dir(
+            split_dir,
+            tmp_path / "out" / "corpus.jsonl",
+            tmp_path / "out" / "queries.jsonl",
+            split="validation",
+            sample_size=-1,
+            sample_seed=42,
+        )

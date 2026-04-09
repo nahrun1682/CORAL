@@ -81,6 +81,9 @@ def convert_split_dir(
     sample_size: int | None = None,
     sample_seed: int = 42,
 ) -> dict[str, Any]:
+    if sample_size is not None and sample_size < 0:
+        raise ValueError("validation-sample-size must be non-negative")
+
     corpus_out.parent.mkdir(parents=True, exist_ok=True)
     queries_out.parent.mkdir(parents=True, exist_ok=True)
 
