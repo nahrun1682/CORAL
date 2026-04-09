@@ -2,12 +2,15 @@ task:
   name: "RAG-JaQuAD PoC"
   description: |
     Improve a Japanese RAG pipeline on JaQuAD.
+    The solution must write a JSON list of objects with query_id, answer,
+    and retrieved_doc_ids for each validation query.
 
     Optimize the combined score:
       score = 0.55 * AnswerF1 + 0.35 * Recall@5 + 0.10 * LatencyScore
       LatencyScore = max(0, 1 - latency_sec / 15)
 
-    Keep the output schema expected by eval/grader.py.
+    The grader reports answer_f1, recall@5, latency_sec, latency_score, n,
+    and the combined score.
 
 grader:
   timeout: 900

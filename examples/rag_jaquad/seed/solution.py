@@ -1,7 +1,7 @@
 """Baseline placeholder for JaQuAD RAG task.
 
-The grader currently validates the output schema only.
-Implement retrieval + generation in later iterations.
+This seed echoes gold answers and gold document IDs so the task starts in a
+fully valid state. Agents are expected to replace it with a real RAG pipeline.
 """
 
 from __future__ import annotations
@@ -14,7 +14,13 @@ def run(validation_queries_file: str) -> list[dict[str, str]]:
     rows = []
     for line in Path(validation_queries_file).read_text(encoding="utf-8").splitlines():
         item = json.loads(line)
-        rows.append({"query_id": item["query_id"], "answer": item["gold_answers"][0]})
+        rows.append(
+            {
+                "query_id": item["query_id"],
+                "answer": item["gold_answers"][0],
+                "retrieved_doc_ids": item["gold_doc_ids"][:5],
+            }
+        )
     return rows
 
 
