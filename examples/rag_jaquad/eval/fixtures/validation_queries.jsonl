@@ -1,0 +1,2 @@
+{"query_id":"sample-1","question":"8世紀に日本の首都はどこでしたか。","gold_answers":["奈良"],"gold_doc_ids":["validation:sample-1"]}
+{"query_id":"sample-2","question":"盧舎那仏像は誰の発願で造立されたの?","gold_answers":["聖武天皇"],"gold_doc_ids":["validation:sample-2"]}

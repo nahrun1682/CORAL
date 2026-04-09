@@ -1,0 +1,10 @@
+# Local dataset checkout
+/data/raw/JaQuAD/
+
+# Generated processed files (reproducible via script)
+/data/processed/train/
+/data/processed/validation/
+
+# Python cache
+**/__pycache__/
+*.pyc

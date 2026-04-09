@@ -1,0 +1,33 @@
+task:
+  name: "RAG-JaQuAD PoC"
+  description: |
+    Improve a Japanese RAG pipeline on JaQuAD.
+
+    Optimize the combined score:
+      score = 0.55 * AnswerF1 + 0.35 * Recall@5 + 0.10 * LatencyScore
+      LatencyScore = max(0, 1 - latency_sec / 15)
+
+    Keep the output schema expected by eval/grader.py.
+
+grader:
+  timeout: 900
+  direction: maximize
+  args:
+    program_file: "solution.py"
+
+agents:
+  count: 1
+  runtime: codex
+  model: gpt-5.4
+  research: false
+
+workspace:
+  results_dir: "./results"
+  repo_path: "./examples/rag_jaquad"
+  setup:
+    - "uv venv .venv && uv pip install --python .venv/bin/python rank-bm25 openai"
+
+run:
+  verbose: false
+  ui: false
+  session: tmux
