@@ -8,8 +8,11 @@ The baseline is intentionally lightweight and deterministic:
 from __future__ import annotations
 
 import json
+import math
+import os
 from pathlib import Path
 import re
+from typing import Callable
 
 
 def _load_jsonl(path: Path, *, label: str) -> list[dict[str, object]]:
@@ -52,11 +55,185 @@ def _best_sentence(question: str, context: str) -> str:
     return max(sentences, key=lambda sentence: _overlap_score(question, sentence))
 
 
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    dot_product = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return dot_product / (left_norm * right_norm)
+
+
+def _strip_quotes(value: str) -> str:
+    stripped = value.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {'"', "'"}:
+        return stripped[1:-1]
+    return stripped
+
+
+def _load_openai_api_key(env_file: str | Path | None = None) -> str | None:
+    env_value = os.getenv("OPENAI_API_KEY")
+    if env_value:
+        return env_value.strip() or None
+
+    candidate = Path(env_file) if env_file is not None else Path(".env")
+    if not candidate.exists():
+        return None
+
+    for line in candidate.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[len("export ") :].lstrip()
+        if "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        if key.strip() == "OPENAI_API_KEY":
+            parsed = _strip_quotes(value)
+            return parsed or None
+    return None
+
+
+def _default_openai_client_factory(api_key: str) -> object:
+    from openai import OpenAI
+
+    return OpenAI(api_key=api_key)
+
+
+def _extract_openai_text(response: object) -> str:
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str):
+        return output_text.strip()
+
+    choices = getattr(response, "choices", None)
+    if choices:
+        first_choice = choices[0]
+        message = getattr(first_choice, "message", None)
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            return content.strip()
+
+    outputs = getattr(response, "output", None)
+    if outputs:
+        text_chunks: list[str] = []
+        for item in outputs:
+            content_items = getattr(item, "content", [])
+            for content_item in content_items:
+                text = getattr(content_item, "text", None)
+                if isinstance(text, str):
+                    text_chunks.append(text)
+        if text_chunks:
+            return "".join(text_chunks).strip()
+
+    return ""
+
+
+def _embed_texts(client: object, texts: list[str], *, model: str) -> list[list[float]]:
+    embeddings_api = getattr(client, "embeddings")
+    response = embeddings_api.create(input=texts, model=model)
+    data = getattr(response, "data", None)
+    if data is None:
+        raise ValueError("embeddings response missing data")
+    return [list(getattr(item, "embedding")) for item in data]
+
+
+def _generate_answer(client: object, *, model: str, question: str, retrieved_docs: list[dict[str, str]]) -> str:
+    context_lines = []
+    for doc in retrieved_docs:
+        context_lines.append(f"[{doc['doc_id']}] {doc['context']}")
+    context = "\n".join(context_lines)
+    prompt = (
+        "あなたは日本語QAアシスタントです。\n"
+        "次のコンテキストだけを使って、質問に対する答えを簡潔に日本語で返してください。\n"
+        "わからない場合は「不明です」と答えてください。\n\n"
+        f"質問: {question}\n\n"
+        f"コンテキスト:\n{context}\n"
+    )
+    responses_api = getattr(client, "responses")
+    response = responses_api.create(model=model, input=prompt)
+    answer = _extract_openai_text(response)
+    return answer or _best_sentence(question, context)
+
+
+def _run_openai_path(
+    queries: list[dict[str, str]],
+    corpus_rows: list[dict[str, str]],
+    *,
+    client: object,
+    top_k: int,
+    embeddings_model: str,
+    generation_model: str,
+) -> list[dict[str, object]]:
+    corpus_texts = [row["text"] for row in corpus_rows]
+    corpus_vectors = _embed_texts(client, corpus_texts, model=embeddings_model)
+    outputs: list[dict[str, object]] = []
+
+    for query in queries:
+        query_id = query["query_id"]
+        question = query["question"]
+        query_vector = _embed_texts(client, [question], model=embeddings_model)[0]
+
+        ranked = sorted(
+            enumerate(corpus_rows),
+            key=lambda item: (-_cosine_similarity(query_vector, corpus_vectors[item[0]]), item[0]),
+        )
+        top_indexes = [index for index, _ in ranked[:top_k]]
+        retrieved_docs = [corpus_rows[index] for index in top_indexes]
+        answer = _generate_answer(
+            client,
+            model=generation_model,
+            question=question,
+            retrieved_docs=retrieved_docs,
+        )
+        outputs.append(
+            {
+                "query_id": query_id,
+                "answer": answer,
+                "retrieved_doc_ids": [doc["doc_id"] for doc in retrieved_docs],
+            }
+        )
+
+    return outputs
+
+
+def _heuristic_run(
+    queries: list[dict[str, str]],
+    corpus_rows: list[dict[str, str]],
+    *,
+    top_k: int,
+) -> list[dict[str, object]]:
+    outputs: list[dict[str, object]] = []
+    for query in queries:
+        query_id = query["query_id"]
+        question = query["question"]
+        ranked = sorted(
+            corpus_rows,
+            key=lambda doc: _overlap_score(question, doc["text"]),
+            reverse=True,
+        )
+        top_docs = ranked[:top_k]
+        answer = _best_sentence(question, top_docs[0]["context"]) if top_docs else ""
+        outputs.append(
+            {
+                "query_id": query_id,
+                "answer": answer,
+                "retrieved_doc_ids": [doc["doc_id"] for doc in top_docs],
+            }
+        )
+    return outputs
+
+
 def run(
     validation_queries_file: str,
     *,
     corpus_file: str | None = None,
     top_k: int = 5,
+    openai_client: object | None = None,
+    client_factory: Callable[[str], object] | None = None,
+    env_file: str | Path | None = None,
+    embeddings_model: str = "text-embedding-3-small",
+    generation_model: str = "gpt-4o-mini",
 ) -> list[dict[str, object]]:
     queries_path = Path(validation_queries_file)
     if corpus_file:
@@ -69,6 +246,7 @@ def run(
     queries = _load_jsonl(queries_path, label="queries.jsonl")
     corpus_rows = _load_jsonl(corpus_path, label="corpus.jsonl")
 
+    normalized_queries: list[dict[str, str]] = []
     normalized_corpus: list[dict[str, str]] = []
     for index, row in enumerate(corpus_rows):
         doc_id = row.get("doc_id")
@@ -83,7 +261,6 @@ def run(
     if top_k <= 0:
         top_k = 1
 
-    outputs: list[dict[str, object]] = []
     for index, query in enumerate(queries):
         query_id = query.get("query_id")
         question = query.get("question")
@@ -91,23 +268,32 @@ def run(
             raise ValueError(f"queries.jsonl line {index + 1}: invalid query_id")
         if not isinstance(question, str) or not question.strip():
             raise ValueError(f"queries.jsonl line {index + 1}: invalid question")
+        normalized_queries.append({"query_id": query_id, "question": question})
 
-        ranked = sorted(
-            normalized_corpus,
-            key=lambda doc: _overlap_score(question, doc["text"]),
-            reverse=True,
-        )
-        top_docs = ranked[:top_k]
-        answer = _best_sentence(question, top_docs[0]["context"]) if top_docs else ""
-        outputs.append(
-            {
-                "query_id": query_id,
-                "answer": answer,
-                "retrieved_doc_ids": [doc["doc_id"] for doc in top_docs],
-            }
-        )
+    resolved_client = openai_client
+    if resolved_client is None:
+        api_key = _load_openai_api_key(env_file)
+        if api_key:
+            try:
+                factory = client_factory or _default_openai_client_factory
+                resolved_client = factory(api_key)
+            except Exception:
+                resolved_client = None
 
-    return outputs
+    if resolved_client is not None:
+        try:
+            return _run_openai_path(
+                normalized_queries,
+                normalized_corpus,
+                client=resolved_client,
+                top_k=top_k,
+                embeddings_model=embeddings_model,
+                generation_model=generation_model,
+            )
+        except Exception:
+            pass
+
+    return _heuristic_run(normalized_queries, normalized_corpus, top_k=top_k)
 
 
 if __name__ == "__main__":
