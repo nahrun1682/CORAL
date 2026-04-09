@@ -115,7 +115,9 @@ class Grader(TaskGrader):
     def evaluate(self) -> float | ScoreBundle:
         program_file = self.args.get("program_file", "solution.py")
         queries_file = Path(self.codebase_path) / "data" / "processed" / "validation" / "queries.jsonl"
+        corpus_file = Path(self.codebase_path) / "data" / "processed" / "validation" / "corpus.jsonl"
         fallback_queries = Path(self.private_dir) / "eval" / "fixtures" / "validation_queries.jsonl"
+        fallback_corpus = Path(self.private_dir) / "eval" / "fixtures" / "validation_corpus.jsonl"
 
         def fail(message: str) -> ScoreBundle:
             return self.fail(message, feedback=message)
@@ -123,8 +125,11 @@ class Grader(TaskGrader):
         if not queries_file.exists():
             if fallback_queries.exists():
                 queries_file = fallback_queries
+                corpus_file = fallback_corpus
             else:
                 return fail("Missing processed dataset. Run scripts/download_jaquad.sh and scripts/prepare_jaquad.py first.")
+        if not corpus_file.exists():
+            return fail("Missing processed corpus. Run scripts/download_jaquad.sh and scripts/prepare_jaquad.py first.")
 
         try:
             gold_rows = _load_jsonl(queries_file)
@@ -149,7 +154,15 @@ class Grader(TaskGrader):
             output_file = Path(td) / "predictions.json"
             start = perf_counter()
             try:
-                result = self.run_program(program_file, "--queries", str(eval_queries_file), "--output", str(output_file))
+                result = self.run_program(
+                    program_file,
+                    "--queries",
+                    str(eval_queries_file),
+                    "--corpus",
+                    str(corpus_file),
+                    "--output",
+                    str(output_file),
+                )
             except Exception as exc:
                 return fail(f"Evaluation failed: {exc}")
             latency_sec = perf_counter() - start

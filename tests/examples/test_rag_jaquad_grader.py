@@ -33,6 +33,18 @@ def _write_queries(path: Path) -> None:
     )
 
 
+def _write_corpus(path: Path) -> None:
+    rows = [
+        {"doc_id": "validation:doc-1", "title": "地理", "context": "日本の首都は東京です。"},
+        {"doc_id": "validation:doc-2", "title": "山", "context": "富士山は静岡県と山梨県にまたがる。"},
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
+        encoding="utf-8",
+    )
+
+
 def _write_raw_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -49,8 +61,10 @@ def _make_grader(tmp_path: Path, *, use_fallback: bool = False) -> Grader:
 
     if use_fallback:
         _write_queries(private_dir / "eval" / "fixtures" / "validation_queries.jsonl")
+        _write_corpus(private_dir / "eval" / "fixtures" / "validation_corpus.jsonl")
     else:
         _write_queries(codebase_path / "data" / "processed" / "validation" / "queries.jsonl")
+        _write_corpus(codebase_path / "data" / "processed" / "validation" / "corpus.jsonl")
 
     grader = Grader(GraderConfig(timeout=300, args={"program_file": "solution.py"}))
     grader.codebase_path = str(codebase_path)
@@ -180,6 +194,48 @@ def test_required_key_missing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert "missing required keys" in (result.feedback or "").lower()
 
 
+@pytest.mark.parametrize(
+    "predictions, expected",
+    [
+        (
+            [{"query_id": None, "answer": "東京", "retrieved_doc_ids": ["validation:doc-1"]}],
+            "invalid query_id",
+        ),
+        (
+            [{"query_id": "q1", "answer": 123, "retrieved_doc_ids": ["validation:doc-1"]}],
+            "invalid answer",
+        ),
+        (
+            [{"query_id": "q1", "answer": "東京", "retrieved_doc_ids": "validation:doc-1"}],
+            "invalid retrieved_doc_ids",
+        ),
+        (
+            [{"query_id": "q1", "answer": "東京", "retrieved_doc_ids": ["validation:doc-1", 1]}],
+            "invalid retrieved_doc_ids",
+        ),
+    ],
+)
+def test_invalid_prediction_field_types_fail_fast(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    predictions: list[dict[str, object]],
+    expected: str,
+) -> None:
+    grader = _make_grader(tmp_path)
+
+    def fake_run_program(self, filename: str, *cmd_args: str):
+        output_file = Path(cmd_args[cmd_args.index("--output") + 1])
+        output_file.write_text(json.dumps(predictions, ensure_ascii=False), encoding="utf-8")
+        return _run_result()
+
+    monkeypatch.setattr(grader_module.TaskGrader, "run_program", fake_run_program)
+
+    result = grader.evaluate()
+
+    assert result.aggregated is None
+    assert expected in (result.feedback or "").lower()
+
+
 def test_duplicate_query_id_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     grader = _make_grader(tmp_path)
 
@@ -217,6 +273,38 @@ def test_run_program_non_zero_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     assert result.aggregated is None
     assert "program failed" in (result.feedback or "").lower()
+
+
+def test_missing_predictions_output_file_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grader = _make_grader(tmp_path)
+
+    def fake_run_program(self, filename: str, *cmd_args: str):
+        return _run_result()
+
+    monkeypatch.setattr(grader_module.TaskGrader, "run_program", fake_run_program)
+
+    result = grader.evaluate()
+
+    assert result.aggregated is None
+    assert "did not write predictions output" in (result.feedback or "").lower()
+
+
+def test_invalid_predictions_json_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grader = _make_grader(tmp_path)
+
+    def fake_run_program(self, filename: str, *cmd_args: str):
+        output_file = Path(cmd_args[cmd_args.index("--output") + 1])
+        output_file.write_text("{broken", encoding="utf-8")
+        return _run_result()
+
+    monkeypatch.setattr(grader_module.TaskGrader, "run_program", fake_run_program)
+
+    result = grader.evaluate()
+
+    assert result.aggregated is None
+    assert "valid json" in (result.feedback or "").lower()
 
 
 def test_prediction_query_id_mismatch_fails(
@@ -274,6 +362,24 @@ def test_validation_fixture_is_used_when_processed_queries_are_missing(
     assert all(set(row) == {"query_id", "question"} for row in captured_rows)
 
 
+def test_missing_corpus_fails_before_program_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grader = _make_grader(tmp_path)
+    corpus_path = Path(grader.codebase_path) / "data" / "processed" / "validation" / "corpus.jsonl"
+    corpus_path.unlink()
+
+    def fake_run_program(self, filename: str, *cmd_args: str):
+        raise AssertionError("run_program should not be called when corpus is missing")
+
+    monkeypatch.setattr(grader_module.TaskGrader, "run_program", fake_run_program)
+
+    result = grader.evaluate()
+
+    assert result.aggregated is None
+    assert "missing processed corpus" in (result.feedback or "").lower()
+
+
 def test_duplicate_query_id_in_gold_dataset_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -298,6 +404,7 @@ def test_duplicate_query_id_in_gold_dataset_fails(
             },
         ],
     )
+    _write_corpus(codebase_path / "data" / "processed" / "validation" / "corpus.jsonl")
     grader = Grader(GraderConfig(timeout=300, args={"program_file": "solution.py"}))
     grader.codebase_path = str(codebase_path)
     grader.private_dir = str(private_dir)
@@ -359,6 +466,7 @@ def test_invalid_gold_dataset_fields_fail(
         codebase_path / "data" / "processed" / "validation" / "queries.jsonl",
         [gold_row],
     )
+    _write_corpus(codebase_path / "data" / "processed" / "validation" / "corpus.jsonl")
     grader = Grader(GraderConfig(timeout=300, args={"program_file": "solution.py"}))
     grader.codebase_path = str(codebase_path)
     grader.private_dir = str(private_dir)
