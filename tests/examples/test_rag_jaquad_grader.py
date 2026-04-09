@@ -62,8 +62,11 @@ def test_answer_f1_recall_and_combined(tmp_path: Path, monkeypatch: pytest.Monke
         {"query_id": "q2", "answer": "静岡県", "retrieved_doc_ids": ["validation:missing", "validation:doc-2"]},
     ]
     calls: list[tuple[str, tuple[str, ...]]] = []
+    seen_query_rows: list[dict[str, object]] = []
 
     def fake_run_program(self, filename: str, *cmd_args: str):
+        queries_path = Path(cmd_args[cmd_args.index("--queries") + 1])
+        seen_query_rows[:] = [json.loads(line) for line in queries_path.read_text(encoding="utf-8").splitlines()]
         output_file = Path(cmd_args[cmd_args.index("--output") + 1])
         output_file.write_text(json.dumps(predictions, ensure_ascii=False), encoding="utf-8")
         calls.append((filename, cmd_args))
@@ -75,6 +78,7 @@ def test_answer_f1_recall_and_combined(tmp_path: Path, monkeypatch: pytest.Monke
     result = grader.evaluate()
 
     assert result.aggregated == pytest.approx(1.0)
+    assert all(set(row) == {"query_id", "question"} for row in seen_query_rows)
     explanation = result.scores["eval"].explanation or ""
     assert "combined=1.0000" in explanation
     assert "answer_f1=1.0000" in explanation
@@ -85,7 +89,7 @@ def test_answer_f1_recall_and_combined(tmp_path: Path, monkeypatch: pytest.Monke
     assert calls and calls[0][0] == "solution.py"
 
 
-def test_missing_prediction_is_skipped_and_reflected_in_n(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_prediction_reduces_score_over_full_query_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     grader = _make_grader(tmp_path)
 
     predictions = [
@@ -102,11 +106,85 @@ def test_missing_prediction_is_skipped_and_reflected_in_n(tmp_path: Path, monkey
 
     result = grader.evaluate()
 
-    assert result.aggregated == pytest.approx(1.0)
+    assert result.aggregated == pytest.approx(0.55)
     explanation = result.scores["eval"].explanation or ""
-    assert "n=1" in explanation
-    assert "answer_f1=1.0000" in explanation
-    assert "recall@5=1.0000" in explanation
+    assert "n=2" in explanation
+    assert "answer_f1=0.5000" in explanation
+    assert "recall@5=0.5000" in explanation
+
+
+def test_predictions_top_level_not_list_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grader = _make_grader(tmp_path)
+
+    def fake_run_program(self, filename: str, *cmd_args: str):
+        output_file = Path(cmd_args[cmd_args.index("--output") + 1])
+        output_file.write_text(json.dumps({"query_id": "q1"}), encoding="utf-8")
+        return _run_result()
+
+    monkeypatch.setattr(grader_module.TaskGrader, "run_program", fake_run_program)
+
+    result = grader.evaluate()
+
+    assert result.aggregated is None
+    assert "must be a list" in (result.feedback or "").lower()
+
+
+def test_required_key_missing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grader = _make_grader(tmp_path)
+
+    def fake_run_program(self, filename: str, *cmd_args: str):
+        output_file = Path(cmd_args[cmd_args.index("--output") + 1])
+        output_file.write_text(
+            json.dumps([
+                {"query_id": "q1", "answer": "東京"},
+                {"query_id": "q2", "answer": "静岡県", "retrieved_doc_ids": ["validation:doc-2"]},
+            ], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return _run_result()
+
+    monkeypatch.setattr(grader_module.TaskGrader, "run_program", fake_run_program)
+
+    result = grader.evaluate()
+
+    assert result.aggregated is None
+    assert "missing required keys" in (result.feedback or "").lower()
+
+
+def test_duplicate_query_id_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grader = _make_grader(tmp_path)
+
+    def fake_run_program(self, filename: str, *cmd_args: str):
+        output_file = Path(cmd_args[cmd_args.index("--output") + 1])
+        output_file.write_text(
+            json.dumps([
+                {"query_id": "q1", "answer": "東京", "retrieved_doc_ids": ["validation:doc-1"]},
+                {"query_id": "q1", "answer": "東京", "retrieved_doc_ids": ["validation:doc-1"]},
+            ], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return _run_result()
+
+    monkeypatch.setattr(grader_module.TaskGrader, "run_program", fake_run_program)
+
+    result = grader.evaluate()
+
+    assert result.aggregated is None
+    assert "duplicate prediction" in (result.feedback or "").lower()
+
+
+def test_run_program_non_zero_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grader = _make_grader(tmp_path)
+
+    def fake_run_program(self, filename: str, *cmd_args: str):
+        return subprocess.CompletedProcess(args=["python"], returncode=1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(grader_module.TaskGrader, "run_program", fake_run_program)
+
+    result = grader.evaluate()
+
+    assert result.aggregated is None
+    assert "program failed" in (result.feedback or "").lower()
 
 
 def test_prediction_query_id_mismatch_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -137,10 +215,11 @@ def test_validation_fixture_is_used_when_processed_queries_are_missing(tmp_path:
         {"query_id": "sample-1", "answer": "奈良", "retrieved_doc_ids": ["validation:sample-1"]},
         {"query_id": "sample-2", "answer": "聖武天皇", "retrieved_doc_ids": ["validation:sample-2"]},
     ]
-    captured: dict[str, str] = {}
+    captured_rows: list[dict[str, object]] = []
 
     def fake_run_program(self, filename: str, *cmd_args: str):
-        captured["queries"] = cmd_args[cmd_args.index("--queries") + 1]
+        queries_path = Path(cmd_args[cmd_args.index("--queries") + 1])
+        captured_rows[:] = [json.loads(line) for line in queries_path.read_text(encoding="utf-8").splitlines()]
         output_file = Path(cmd_args[cmd_args.index("--output") + 1])
         output_file.write_text(json.dumps(predictions, ensure_ascii=False), encoding="utf-8")
         return _run_result()
@@ -150,4 +229,4 @@ def test_validation_fixture_is_used_when_processed_queries_are_missing(tmp_path:
 
     grader.evaluate()
 
-    assert captured["queries"] == str(Path(grader.private_dir) / "eval" / "fixtures" / "validation_queries.jsonl")
+    assert all(set(row) == {"query_id", "question"} for row in captured_rows)

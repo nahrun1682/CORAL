@@ -16,6 +16,14 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
+        encoding="utf-8",
+    )
+
+
 def _tokenize(text: str) -> list[str]:
     text = text.strip()
     if not text:
@@ -94,17 +102,24 @@ class Grader(TaskGrader):
             return fail(f"Failed to load validation queries: {exc}")
 
         gold_by_id: dict[str, dict[str, Any]] = {}
+        eval_rows: list[dict[str, Any]] = []
         for index, row in enumerate(gold_rows):
             query_id = row.get("query_id")
+            question = row.get("question")
             if not isinstance(query_id, str) or not query_id.strip():
                 return fail(f"Validation query at index {index} has an invalid query_id.")
+            if not isinstance(question, str) or not question.strip():
+                return fail(f"Validation query {query_id!r} has an invalid question.")
             gold_by_id[query_id] = row
+            eval_rows.append({"query_id": query_id, "question": question})
 
         with tempfile.TemporaryDirectory() as td:
+            eval_queries_file = Path(td) / "queries.jsonl"
+            _write_jsonl(eval_queries_file, eval_rows)
             output_file = Path(td) / "predictions.json"
             start = perf_counter()
             try:
-                result = self.run_program(program_file, "--queries", str(queries_file), "--output", str(output_file))
+                result = self.run_program(program_file, "--queries", str(eval_queries_file), "--output", str(output_file))
             except Exception as exc:
                 return fail(f"Evaluation failed: {exc}")
             latency_sec = perf_counter() - start
@@ -136,17 +151,14 @@ class Grader(TaskGrader):
                 return fail(f"Prediction query_id {query_id!r} does not match validation data.")
             predictions[query_id] = pred
 
-        matched_ids = [query_id for query_id in gold_by_id if query_id in predictions]
-        missing_ids = [query_id for query_id in gold_by_id if query_id not in predictions]
-
-        if not matched_ids:
-            return fail("No matching predictions were found.")
+        if not gold_by_id:
+            return fail("Validation data is empty.")
 
         answer_f1_values: list[float] = []
         recall_values: list[float] = []
-        for query_id in matched_ids:
-            gold_row = gold_by_id[query_id]
-            pred = predictions[query_id]
+        missing_count = 0
+        for query_id, gold_row in gold_by_id.items():
+            pred = predictions.get(query_id)
             gold_answers = gold_row.get("gold_answers", [])
             gold_doc_ids = gold_row.get("gold_doc_ids", [])
 
@@ -155,12 +167,16 @@ class Grader(TaskGrader):
             if not isinstance(gold_doc_ids, list) or not gold_doc_ids:
                 return fail(f"Validation query {query_id!r} is missing gold_doc_ids.")
 
-            answer_f1_values.append(max(_f1_score(pred["answer"], str(gold_answer)) for gold_answer in gold_answers))
-            recall_values.append(
-                1.0 if set(gold_doc_ids).intersection(pred["retrieved_doc_ids"][:5]) else 0.0
-            )
+            if pred is None:
+                missing_count += 1
+                answer_f1_values.append(0.0)
+                recall_values.append(0.0)
+                continue
 
-        n = len(matched_ids)
+            answer_f1_values.append(max(_f1_score(pred["answer"], str(gold_answer)) for gold_answer in gold_answers))
+            recall_values.append(1.0 if set(gold_doc_ids).intersection(pred["retrieved_doc_ids"][:5]) else 0.0)
+
+        n = len(gold_by_id)
         answer_f1 = sum(answer_f1_values) / n
         recall_at_5 = sum(recall_values) / n
         latency_per_query = latency_sec / n if n else 0.0
@@ -175,7 +191,7 @@ class Grader(TaskGrader):
             f"latency_score={latency_score:.4f}, "
             f"n={n}"
         )
-        if missing_ids:
-            explanation += f", skipped_missing={len(missing_ids)}"
+        if missing_count:
+            explanation += f", missing_predictions={missing_count}"
 
         return self.score(combined, explanation)

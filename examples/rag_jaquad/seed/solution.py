@@ -17,8 +17,8 @@ def run(validation_queries_file: str) -> list[dict[str, str]]:
         rows.append(
             {
                 "query_id": item["query_id"],
-                "answer": item["gold_answers"][0],
-                "retrieved_doc_ids": item["gold_doc_ids"][:5],
+                "answer": "",
+                "retrieved_doc_ids": [],
             }
         )
     return rows
