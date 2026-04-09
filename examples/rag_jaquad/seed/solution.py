@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import re
+import sys
 from typing import Callable
 
 
@@ -99,6 +100,14 @@ def _default_openai_client_factory(api_key: str) -> object:
     from openai import OpenAI
 
     return OpenAI(api_key=api_key)
+
+
+def _warn_openai_fallback(stage: str, error: Exception) -> None:
+    print(
+        f"[rag_jaquad] OpenAI {stage} failed ({type(error).__name__}: {error}); "
+        "falling back to local heuristic path.",
+        file=sys.stderr,
+    )
 
 
 def _extract_openai_text(response: object) -> str:
@@ -234,6 +243,7 @@ def run(
     env_file: str | Path | None = None,
     embeddings_model: str = "text-embedding-3-small",
     generation_model: str = "gpt-4o-mini",
+    strict_openai: bool = False,
 ) -> list[dict[str, object]]:
     queries_path = Path(validation_queries_file)
     if corpus_file:
@@ -277,8 +287,10 @@ def run(
             try:
                 factory = client_factory or _default_openai_client_factory
                 resolved_client = factory(api_key)
-            except Exception:
-                resolved_client = None
+            except Exception as exc:
+                if strict_openai:
+                    raise
+                _warn_openai_fallback("client initialization", exc)
 
     if resolved_client is not None:
         try:
@@ -290,8 +302,10 @@ def run(
                 embeddings_model=embeddings_model,
                 generation_model=generation_model,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            if strict_openai:
+                raise
+            _warn_openai_fallback("runtime", exc)
 
     return _heuristic_run(normalized_queries, normalized_corpus, top_k=top_k)
 
@@ -304,7 +318,13 @@ if __name__ == "__main__":
     parser.add_argument("--output", required=True)
     parser.add_argument("--corpus", default=None)
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--strict-openai", action="store_true")
     args = parser.parse_args()
 
-    output = run(args.queries, corpus_file=args.corpus, top_k=args.top_k)
+    output = run(
+        args.queries,
+        corpus_file=args.corpus,
+        top_k=args.top_k,
+        strict_openai=args.strict_openai,
+    )
     Path(args.output).write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")

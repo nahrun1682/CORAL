@@ -191,3 +191,79 @@ def test_run_falls_back_to_local_heuristic_when_openai_unavailable(tmp_path: Pat
 
     assert rows[0]["retrieved_doc_ids"] == ["d1"]
     assert "東京" in rows[0]["answer"]
+
+
+def test_run_openai_runtime_failure_falls_back_with_warning(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    queries_file = tmp_path / "validation" / "queries.jsonl"
+    corpus_file = tmp_path / "validation" / "corpus.jsonl"
+    _write_jsonl(
+        queries_file,
+        [{"query_id": "q1", "question": "日本の首都はどこですか?"}],
+    )
+    _write_jsonl(
+        corpus_file,
+        [
+            {"doc_id": "d1", "title": "地理", "context": "日本の首都は東京です。"},
+            {"doc_id": "d2", "title": "雑学", "context": "海の深さはさまざまです。"},
+        ],
+    )
+
+    class FailingClient:
+        def __init__(self) -> None:
+            self.embeddings = SimpleNamespace(create=self._create_embeddings)
+            self.responses = SimpleNamespace(create=self._create_response)
+
+        def _create_embeddings(self, *, input: object, model: str) -> object:
+            raise RuntimeError("simulated embedding failure")
+
+        def _create_response(self, *, model: str, input: object, **kwargs: object) -> object:
+            raise AssertionError("responses should not be called when embeddings fail")
+
+    rows = run(
+        str(queries_file),
+        corpus_file=str(corpus_file),
+        top_k=1,
+        openai_client=FailingClient(),
+    )
+
+    captured = capsys.readouterr()
+    assert rows[0]["retrieved_doc_ids"] == ["d1"]
+    assert "東京" in rows[0]["answer"]
+    assert "falling back" in captured.err.lower()
+    assert "simulated embedding failure" in captured.err
+
+
+def test_run_openai_runtime_failure_raises_in_strict_mode(tmp_path: Path) -> None:
+    queries_file = tmp_path / "validation" / "queries.jsonl"
+    corpus_file = tmp_path / "validation" / "corpus.jsonl"
+    _write_jsonl(
+        queries_file,
+        [{"query_id": "q1", "question": "日本の首都はどこですか?"}],
+    )
+    _write_jsonl(
+        corpus_file,
+        [
+            {"doc_id": "d1", "title": "地理", "context": "日本の首都は東京です。"},
+            {"doc_id": "d2", "title": "雑学", "context": "海の深さはさまざまです。"},
+        ],
+    )
+
+    class FailingClient:
+        def __init__(self) -> None:
+            self.embeddings = SimpleNamespace(create=self._create_embeddings)
+            self.responses = SimpleNamespace(create=self._create_response)
+
+        def _create_embeddings(self, *, input: object, model: str) -> object:
+            raise RuntimeError("simulated embedding failure")
+
+        def _create_response(self, *, model: str, input: object, **kwargs: object) -> object:
+            raise AssertionError("responses should not be called when embeddings fail")
+
+    with pytest.raises(RuntimeError, match="simulated embedding failure"):
+        run(
+            str(queries_file),
+            corpus_file=str(corpus_file),
+            top_k=1,
+            openai_client=FailingClient(),
+            strict_openai=True,
+        )
