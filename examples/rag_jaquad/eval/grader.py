@@ -81,6 +81,36 @@ def _validate_prediction(item: Any, index: int) -> dict[str, Any]:
     }
 
 
+def _validate_gold_row(row: Any, index: int) -> tuple[str, dict[str, Any]]:
+    if not isinstance(row, dict):
+        raise ValueError(f"Validation query at index {index} must be an object.")
+
+    query_id = row.get("query_id")
+    question = row.get("question")
+    gold_answers = row.get("gold_answers")
+    gold_doc_ids = row.get("gold_doc_ids")
+
+    if not isinstance(query_id, str) or not query_id.strip():
+        raise ValueError(f"Validation query at index {index} has an invalid query_id.")
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError(f"Validation query {query_id!r} has an invalid question.")
+    if not isinstance(gold_answers, list) or not gold_answers:
+        raise ValueError(f"Validation query {query_id!r} has invalid gold_answers.")
+    if any(not isinstance(answer, str) or not answer.strip() for answer in gold_answers):
+        raise ValueError(f"Validation query {query_id!r} has invalid gold_answers.")
+    if not isinstance(gold_doc_ids, list) or not gold_doc_ids:
+        raise ValueError(f"Validation query {query_id!r} has invalid gold_doc_ids.")
+    if any(not isinstance(doc_id, str) or not doc_id.strip() for doc_id in gold_doc_ids):
+        raise ValueError(f"Validation query {query_id!r} has invalid gold_doc_ids.")
+
+    normalized = {
+        "question": question,
+        "gold_answers": gold_answers,
+        "gold_doc_ids": gold_doc_ids,
+    }
+    return query_id, normalized
+
+
 class Grader(TaskGrader):
     def evaluate(self) -> float | ScoreBundle:
         program_file = self.args.get("program_file", "solution.py")
@@ -104,14 +134,14 @@ class Grader(TaskGrader):
         gold_by_id: dict[str, dict[str, Any]] = {}
         eval_rows: list[dict[str, Any]] = []
         for index, row in enumerate(gold_rows):
-            query_id = row.get("query_id")
-            question = row.get("question")
-            if not isinstance(query_id, str) or not query_id.strip():
-                return fail(f"Validation query at index {index} has an invalid query_id.")
-            if not isinstance(question, str) or not question.strip():
-                return fail(f"Validation query {query_id!r} has an invalid question.")
-            gold_by_id[query_id] = row
-            eval_rows.append({"query_id": query_id, "question": question})
+            try:
+                query_id, normalized = _validate_gold_row(row, index)
+            except ValueError as exc:
+                return fail(str(exc))
+            if query_id in gold_by_id:
+                return fail(f"Duplicate validation query_id {query_id!r}.")
+            gold_by_id[query_id] = normalized
+            eval_rows.append({"query_id": query_id, "question": normalized["question"]})
 
         with tempfile.TemporaryDirectory() as td:
             eval_queries_file = Path(td) / "queries.jsonl"
@@ -159,13 +189,8 @@ class Grader(TaskGrader):
         missing_count = 0
         for query_id, gold_row in gold_by_id.items():
             pred = predictions.get(query_id)
-            gold_answers = gold_row.get("gold_answers", [])
-            gold_doc_ids = gold_row.get("gold_doc_ids", [])
-
-            if not isinstance(gold_answers, list) or not gold_answers:
-                return fail(f"Validation query {query_id!r} is missing gold answers.")
-            if not isinstance(gold_doc_ids, list) or not gold_doc_ids:
-                return fail(f"Validation query {query_id!r} is missing gold_doc_ids.")
+            gold_answers = gold_row["gold_answers"]
+            gold_doc_ids = gold_row["gold_doc_ids"]
 
             if pred is None:
                 missing_count += 1

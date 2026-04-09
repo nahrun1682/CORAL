@@ -1,7 +1,8 @@
 """Baseline placeholder for JaQuAD RAG task.
 
-This seed echoes gold answers and gold document IDs so the task starts in a
-fully valid state. Agents are expected to replace it with a real RAG pipeline.
+This seed emits the required prediction schema:
+`query_id: str`, `answer: str`, `retrieved_doc_ids: list[str]`.
+Agents are expected to replace it with a real RAG pipeline.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import json
 from pathlib import Path
 
 
-def run(validation_queries_file: str) -> list[dict[str, str]]:
+def run(validation_queries_file: str) -> list[dict[str, object]]:
     rows = []
     for line in Path(validation_queries_file).read_text(encoding="utf-8").splitlines():
         item = json.loads(line)
